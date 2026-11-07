@@ -2,6 +2,7 @@
  * Lampa plugin: "VLC playlist"
  * Перехватывает запуск торрента (TorrServer) и вместо встроенного плеера
  * отдаёт во внешний плеер (VLC и т.п.) плейлист .m3u, начиная с выбранной серии.
+ * VLC сам переключит на следующую серию.
  */
 (function () {
     'use strict';
@@ -18,6 +19,7 @@
     function bool(v) { return v === true || v === 'true'; }
     function noty(t) { try { Lampa.Noty.show(t); } catch (e) { console.log('[vlc-pl]', t); } }
 
+    /* ---------- разбор ссылки TorrServer ---------- */
     function parseTs(url) {
         if (typeof url !== 'string') return null;
         var link = url.match(/[?&]link=([^&]+)/);
@@ -35,6 +37,8 @@
         return a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
     }
 
+    /* ---------- сбор списка серий ---------- */
+    // 1) из плейлиста, который Lampa передала плееру
     function fromLampaPlaylist(data, playlist) {
         if (!Array.isArray(playlist) || playlist.length < 2) return null;
         var items = playlist.filter(function (p) { return p && typeof p.url === 'string' && p.url; });
@@ -48,6 +52,7 @@
         });
     }
 
+    // 2) у TorrServer: список файлов торрента
     function fromTorrServer(ts, done) {
         var url = ts.base + '/stream/fname?link=' + encodeURIComponent(ts.hash) + '&stat';
         fetch(url).then(function (r) { return r.json(); }).then(function (st) {
@@ -91,12 +96,14 @@
         return out.join('\r\n') + '\r\n';
     }
 
+    /* ---------- запуск внешнего плеера ---------- */
     function nodeRequire() {
         try { if (typeof require === 'function') return require; } catch (e) {}
         try { if (window.nw && typeof window.require === 'function') return window.require; } catch (e) {}
         return null;
     }
 
+    // десктопная Lampa (NW.js / Electron): запускаем vlc.exe напрямую
     function spawnPlayer(list) {
         var req = nodeRequire();
         var path = S('path', '');
@@ -112,6 +119,7 @@
         }
     }
 
+    // браузер: скачиваем .m3u (браузер может сразу открыть его в VLC)
     function downloadM3U(list, name) {
         var blob = new Blob([buildM3U(list)], { type: 'audio/x-mpegurl' });
         var a = document.createElement('a');
@@ -132,7 +140,25 @@
         t.remove();
     }
 
+    // vlcpl:// — открывает VLC через обработчик из install-lampa-vlc.cmd
+    function launchProto(ts) {
+        var u = 'vlcpl://play?ts=' + encodeURIComponent(ts.base) +
+            '&hash=' + encodeURIComponent(ts.hash) +
+            '&index=' + (ts.index === null ? '' : ts.index);
+        var a = document.createElement('a');
+        a.href = u;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+    }
+
     function openExternal(data, playlist) {
+        var ts = parseTs(data.url);
+        if (S('method', 'm3u') === 'proto' && ts && /^[A-Za-z0-9]{32,40}$/.test(ts.hash)) {
+            launchProto(ts);
+            noty('Открываю VLC…');
+            return;
+        }
         collect(data, playlist, function (list) {
             if (spawnPlayer(list)) {
                 noty('Открываю в плеере: ' + list.length + ' сер.');
@@ -143,6 +169,7 @@
         });
     }
 
+    /* ---------- перехват Lampa.Player ---------- */
     var origPlay = Lampa.Player.play;
     var origPlaylist = Lampa.Player.playlist;
     var pending = null;
@@ -160,6 +187,7 @@
             return origPlay.apply(self, args);
         }
 
+        // Lampa обычно вызывает playlist() сразу после play() — ждём его
         pending = { data: data, playlist: data.playlist || null };
         var cur = pending;
 
@@ -194,6 +222,7 @@
         }, 150);
     };
 
+    /* ---------- настройки ---------- */
     function addSettings() {
         if (!Lampa.SettingsApi) return;
         Lampa.SettingsApi.addComponent({
@@ -210,6 +239,11 @@
             component: 'vlcpl',
             param: { name: 'vlcpl_mode', type: 'select', values: { ask: 'Спрашивать', vlc: 'Сразу во внешний плеер' }, default: 'ask' },
             field: { name: 'Режим', description: 'Что делать при запуске серии' }
+        });
+        Lampa.SettingsApi.addParam({
+            component: 'vlcpl',
+            param: { name: 'vlcpl_method', type: 'select', values: { m3u: 'Скачать .m3u', proto: 'Ссылка vlcpl:// (нужен установщик)' }, default: 'm3u' },
+            field: { name: 'Способ открытия', description: 'vlcpl:// открывает VLC сразу, без скачивания. Нужен install-lampa-vlc.cmd' }
         });
         Lampa.SettingsApi.addParam({
             component: 'vlcpl',
